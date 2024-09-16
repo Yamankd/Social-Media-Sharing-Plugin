@@ -52,7 +52,6 @@ function social_share_instructions() {
 function social_share_credentials() {
     // Save the credentials
     if (isset($_POST['save_credentials'])) {
-        // Check nonce for security
         check_admin_referer('save_credentials_action', 'save_credentials_nonce');
 
         update_option('linkedin_api_key', sanitize_text_field($_POST['linkedin_api_key']));
@@ -60,39 +59,28 @@ function social_share_credentials() {
     }
 
     // Check the connection
-    $connection_status = '';
     if (isset($_POST['check_connection'])) {
-        // Check nonce for security
         check_admin_referer('check_connection_action', 'check_connection_nonce');
 
         $linkedin_api_key = get_option('linkedin_api_key');
         $linkedin_secret_key = get_option('linkedin_secret_key');
+        $access_token = get_linkedin_access_token($linkedin_api_key, $linkedin_secret_key);
 
-        if (!empty($linkedin_api_key) && !empty($linkedin_secret_key)) {
-            $access_token = get_linkedin_access_token($linkedin_api_key, $linkedin_secret_key);
+        if ($access_token) {
+            $response = wp_remote_get('https://api.linkedin.com/v2/me', [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $access_token
+                ] 
+            ]);
 
-            if ($access_token) {
-                $response = wp_remote_get('https://api.linkedin.com/v2/me', [
-                    'headers' => [
-                        'Authorization' => 'Bearer ' . $access_token
-                    ]
-                ]);
-
-                if (is_wp_error($response)) {
-                    $connection_status = "Connection failed: " . $response->get_error_message();
-                } else {
-                    $status_code = wp_remote_retrieve_response_code($response);
-                    if ($status_code == 200) {
-                        $connection_status = "Connection successful!";
-                    } else {
-                        $connection_status = "Connection failed: Invalid API credentials. Status code: " . $status_code;
-                    }
-                }
+            if (is_wp_error($response)) {
+                $connection_status = "Connection failed: " . $response->get_error_message();
             } else {
-                $connection_status = "Connection failed: Could not retrieve access token.";
+                $status_code = wp_remote_retrieve_response_code($response);
+                $connection_status = ($status_code == 200) ? "Connection successful!" : "Connection failed: Invalid API credentials. Status code: " . $status_code;
             }
         } else {
-            $connection_status = "Please enter both API Key and Secret Key.";
+            $connection_status = "Connection failed: Could not retrieve access token.";
         }
     }
 
@@ -117,31 +105,57 @@ function social_share_credentials() {
                 <button type="submit" name="check_connection" class="button button-secondary">Check Connection</button>
             </p>
         </form>
-        <?php if ($connection_status) : ?>
+        <?php if (isset($connection_status)) : ?>
             <p><strong><?php echo esc_html($connection_status); ?></strong></p>
         <?php endif; ?>
     </div>
     <?php
 }
 
-
-// Function to get LinkedIn access token (Dummy function for demonstration)
 function get_linkedin_access_token($client_id, $client_secret) {
     // Implement the OAuth 2.0 flow to get the access token
-    // This function should return the access token required for LinkedIn API calls
-    // For demonstration purposes, we'll return a dummy token
-    return 'YOUR_ACCESS_TOKEN';
+    return 'AQWfAmvBemY3FyovP0T7ZccJ0e1ljuFeY9RC4jfZyQA_xvFzjk5Mv6uUO2xedjtELOAO8ZUbLEQoPHPfqxNYvLB4S1WYMCqIJKhkjlDFKUGMW8Y7d42AIfkrJ2RpTiQnGSJvTTXPmeiqZ_kRBJtfwSTQ_rnUyvVMbN_BqU80WQt8pxnyDTeMIyiSRd67KedTP7jV3tpE_xoaRy1ZQktyD2cE7qazayKQXzeddQoRtUXFPXEyG9yCmLmIJxrbtRSrpcDjSsHFw9vwaNgOHxor-sf9MbNS5_gTQWvF5o2GNr_9DbJShXhDftn9sepBOPV6bpDkC655Ox9ySo6gblKO0z-CvB_pSA'; // Dummy token for demonstration
 }
 
 function social_share_log() {
+    // Handle delete request
+    if (isset($_GET['delete_post']) && check_admin_referer('delete_post_action')) {
+        $post_id = intval($_GET['delete_post']);
+        $result = wp_delete_post($post_id, true);
+
+        $message = $result ? 'Post deleted successfully.' : 'Failed to delete the post.';
+        $class = $result ? 'updated' : 'error';
+        echo "<div class=\"$class notice is-dismissible\"><p>$message</p></div>";
+    }
+
+    // Handle edit request
+    if (isset($_POST['update_post']) && check_admin_referer('update_post_action')) {
+        $post_id = intval($_POST['post_id']);
+        $post_title = sanitize_text_field($_POST['post_title']);
+        $post_content = wp_kses_post($_POST['post_content']);
+        
+        $updated_post = [
+            'ID'           => $post_id,
+            'post_title'    => $post_title,
+            'post_content'  => $post_content,
+        ];
+
+        $result = wp_update_post($updated_post);
+
+        $message = $result ? 'Post updated successfully.' : 'Failed to update the post.';
+        $class = $result ? 'updated' : 'error';
+        echo "<div class=\"$class notice is-dismissible\"><p>$message</p></div>";
+    }
+
     ?>
     <div class="wrap">
         <h1>Shared Post Log</h1>
         <table class="widefat fixed" cellspacing="0">
             <thead>
                 <tr>
-                    <th id="columnname" class="manage-column column-columnname" scope="col">Post Title</th>
-                    <th id="columnname" class="manage-column column-columnname" scope="col">Date Shared</th>
+                    <th>Post Title</th>
+                    <th>Date Shared</th>
+                    <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -149,14 +163,52 @@ function social_share_log() {
                 $shared_posts = get_option('shared_posts_log', []);
                 if (!empty($shared_posts)) {
                     foreach ($shared_posts as $post) {
-                        echo "<tr><td>{$post['title']}</td><td>{$post['date_shared']}</td></tr>";
+                        echo "<tr>
+                                <td>{$post['title']}</td>
+                                <td>{$post['date_shared']}</td>
+                                <td>
+                                    <a href='" . get_edit_post_link($post['ID']) . "' class='button button-secondary'>Edit Post</a>
+                                    <a href='?page=post-log&delete_post={$post['ID']}&_wpnonce=" . wp_create_nonce('delete_post_action') . "' class='button button-secondary' onclick='return confirm(\"Are you sure you want to delete this post?\");'>Delete Post</a>
+                                </td>
+                            </tr>";
                     }
                 } else {
-                    echo "<tr><td colspan='2'>No posts have been shared yet.</td></tr>";
+                    echo "<tr><td colspan='3'>No posts have been shared yet.</td></tr>";
                 }
                 ?>
             </tbody>
         </table>
+
+        <h2>Edit Post</h2>
+        <?php
+        if (isset($_GET['edit_post'])) {
+            $post_id = intval($_GET['edit_post']);
+            $post = get_post($post_id);
+            if ($post) {
+                ?>
+                <form method="post">
+                    <?php wp_nonce_field('update_post_action'); ?>
+                    <input type="hidden" name="post_id" value="<?php echo esc_attr($post_id); ?>" />
+                    <table class="form-table">
+                        <tr>
+                            <th><label for="post_title">Post Title</label></th>
+                            <td><input type="text" id="post_title" name="post_title" value="<?php echo esc_attr($post->post_title); ?>" class="regular-text" /></td>
+                        </tr>
+                        <tr>
+                            <th><label for="post_content">Post Content</label></th>
+                            <td><?php wp_editor($post->post_content, 'post_content'); ?></td>
+                        </tr>
+                    </table>
+                    <p class="submit">
+                        <button type="submit" name="update_post" class="button button-primary">Update Post</button>
+                    </p>
+                </form>
+                <?php
+            } else {
+                echo '<div class="error notice is-dismissible"><p>Post not found.</p></div>';
+            }
+        }
+        ?>
     </div>
     <?php
 }
@@ -174,17 +226,31 @@ function share_post_on_social_media($post_id) {
     $access_token = get_linkedin_access_token($linkedin_api_key, $linkedin_secret_key);
 
     if (empty($linkedin_api_key) || empty($linkedin_secret_key) || empty($access_token)) {
-        return; // No credentials or token, don't proceed
+        return;
     }
 
+    // Retrieve profile ID via LinkedIn API
+    $response = wp_remote_get('https://api.linkedin.com/v2/me', [
+        'headers' => [
+            'Authorization' => 'Bearer ' . $access_token
+        ]
+    ]);
+
+    if (is_wp_error($response)) {
+        error_log('Error retrieving LinkedIn profile ID: ' . $response->get_error_message());
+        return;
+    }
+
+    $profile_data = json_decode(wp_remote_retrieve_body($response), true);
+    $profile_id = $profile_data['id'];
+
     $linkedin_url = 'https://api.linkedin.com/v2/shares';
-    
+
     $body = json_encode([
         'content' => [
             'contentEntities' => [
                 [
-                    'entityLocation' => $post_url,
-                    'thumbnails' => []
+                    'entityLocation' => $post_url
                 ]
             ],
             'title' => $post_title
@@ -192,7 +258,7 @@ function share_post_on_social_media($post_id) {
         'distribution' => [
             'linkedInDistributionTarget' => []
         ],
-        'owner' => 'urn:li:person:A0FZhFqY5Hr9Y2k1v4Jr9oFhzN7G', // Replace this with your LinkedIn profile ID
+        'owner' => 'urn:li:person:' . $profile_id, // Use the retrieved LinkedIn profile ID
         'text' => [
             'text' => "Check out my new post: $post_title - $post_url"
         ]
@@ -208,14 +274,14 @@ function share_post_on_social_media($post_id) {
     ];
 
     $response = wp_remote_post($linkedin_url, $args);
-    
+
     if (is_wp_error($response)) {
         error_log('Error sharing post on LinkedIn: ' . $response->get_error_message());
         return;
     }
 
     $status_code = wp_remote_retrieve_response_code($response);
-    
+
     if ($status_code != 201) {
         error_log('Failed to share post on LinkedIn. Status code: ' . $status_code);
         return;
@@ -225,7 +291,9 @@ function share_post_on_social_media($post_id) {
     $shared_posts = get_option('shared_posts_log', []);
     $shared_posts[] = [
         'title' => $post_title,
-        'date_shared' => date('Y-m-d H:i:s')
+        'date_shared' => date('Y-m-d H:i:s'),
+        'ID' => $post_id
     ];
     update_option('shared_posts_log', $shared_posts);
 }
+
