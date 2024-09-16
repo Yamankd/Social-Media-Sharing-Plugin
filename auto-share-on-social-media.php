@@ -62,25 +62,31 @@ function social_share_credentials() {
     if (isset($_POST['check_connection'])) {
         check_admin_referer('check_connection_action', 'check_connection_nonce');
 
-        $linkedin_api_key = get_option('linkedin_api_key');
-        $linkedin_secret_key = get_option('linkedin_secret_key');
-        $access_token = get_linkedin_access_token($linkedin_api_key, $linkedin_secret_key);
+        // Fetch the stored access token (assume it's saved after the OAuth flow)
+        $access_token = get_option('linkedin_access_token');
 
         if ($access_token) {
+            // Make an API request to check if the access token is valid
             $response = wp_remote_get('https://api.linkedin.com/v2/me', [
                 'headers' => [
                     'Authorization' => 'Bearer ' . $access_token
-                ] 
+                ]
             ]);
 
             if (is_wp_error($response)) {
                 $connection_status = "Connection failed: " . $response->get_error_message();
             } else {
                 $status_code = wp_remote_retrieve_response_code($response);
-                $connection_status = ($status_code == 200) ? "Connection successful!" : "Connection failed: Invalid API credentials. Status code: " . $status_code;
+
+                // Check if the status code is 200 (success)
+                if ($status_code == 200) {
+                    $connection_status = "Connection successful!";
+                } else {
+                    $connection_status = "Connection failed: Invalid access token. Status code: " . $status_code;
+                }
             }
         } else {
-            $connection_status = "Connection failed: Could not retrieve access token.";
+            $connection_status = "Connection failed: Access token not found.";
         }
     }
 
@@ -112,10 +118,35 @@ function social_share_credentials() {
     <?php
 }
 
-function get_linkedin_access_token($client_id, $client_secret) {
-    // Implement the OAuth 2.0 flow to get the access token
-    return 'AQWfAmvBemY3FyovP0T7ZccJ0e1ljuFeY9RC4jfZyQA_xvFzjk5Mv6uUO2xedjtELOAO8ZUbLEQoPHPfqxNYvLB4S1WYMCqIJKhkjlDFKUGMW8Y7d42AIfkrJ2RpTiQnGSJvTTXPmeiqZ_kRBJtfwSTQ_rnUyvVMbN_BqU80WQt8pxnyDTeMIyiSRd67KedTP7jV3tpE_xoaRy1ZQktyD2cE7qazayKQXzeddQoRtUXFPXEyG9yCmLmIJxrbtRSrpcDjSsHFw9vwaNgOHxor-sf9MbNS5_gTQWvF5o2GNr_9DbJShXhDftn9sepBOPV6bpDkC655Ox9ySo6gblKO0z-CvB_pSA'; // Dummy token for demonstration
+
+function get_linkedin_access_token($authorization_code) {
+    $client_id = get_option('linkedin_api_key');
+    $client_secret = get_option('linkedin_secret_key');
+    $redirect_uri = 'https://www.linkedin.com/developers/tools/oauth/redirect'; // Define your authorized redirect URI here
+
+    $response = wp_remote_post('https://www.linkedin.com/oauth/v2/accessToken', [
+        'body' => [
+            'grant_type' => 'authorization_code',
+            'code' => $authorization_code,
+            'redirect_uri' => $redirect_uri, // Must match the one set in the LinkedIn Developer Portal
+            'client_id' => $client_id,
+            'client_secret' => $client_secret,
+        ],
+        'headers' => [
+            'Content-Type' => 'application/x-www-form-urlencoded',
+        ]
+    ]);
+
+    if (is_wp_error($response)) {
+        return false;
+    }
+
+    $response_body = wp_remote_retrieve_body($response);
+    $data = json_decode($response_body, true);
+
+    return isset($data['access_token']) ? $data['access_token'] : false;
 }
+
 
 function social_share_log() {
     // Handle delete request
