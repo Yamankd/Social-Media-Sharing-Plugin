@@ -6,10 +6,8 @@
  * Author: Your Name
  */
 
-// Hook to add the admin menu
 add_action('admin_menu', 'social_share_menu');
 
-// Function to add admin menu
 function social_share_menu() {
     add_menu_page('Social Share Plugin', 'Social Share', 'manage_options', 'social-share', 'social_share_instructions', 'dashicons-share');
     add_submenu_page('social-share', 'User Instructions', 'User Instructions', 'manage_options', 'user-instructions', 'social_share_instructions');
@@ -17,7 +15,6 @@ function social_share_menu() {
     add_submenu_page('social-share', 'Post Log', 'Post Log', 'manage_options', 'post-log', 'social_share_log');
 }
 
-// Instructions page
 function social_share_instructions() {
     ?>
     <div class="wrap">
@@ -32,16 +29,13 @@ function social_share_instructions() {
     <?php
 }
 
-// Credentials page
 function social_share_credentials() {
-    // Save credentials
     if (isset($_POST['save_credentials'])) {
         check_admin_referer('save_credentials_action', 'save_credentials_nonce');
         update_option('linkedin_api_key', sanitize_text_field($_POST['linkedin_api_key']));
         update_option('linkedin_secret_key', sanitize_text_field($_POST['linkedin_secret_key']));
     }
 
-    // Check connection
     if (isset($_POST['check_connection'])) {
         check_admin_referer('check_connection_action', 'check_connection_nonce');
         $access_token = get_option('linkedin_access_token');
@@ -66,7 +60,6 @@ function social_share_credentials() {
         <h1>Add LinkedIn Credentials</h1>
         <form method="post">
             <?php wp_nonce_field('save_credentials_action', 'save_credentials_nonce'); ?>
-            <?php wp_nonce_field('check_connection_action', 'check_connection_nonce'); ?>
             <table class="form-table">
                 <tr>
                     <th scope="row"><label for="linkedin_api_key">LinkedIn API Key</label></th>
@@ -79,9 +72,16 @@ function social_share_credentials() {
             </table>
             <p class="submit">
                 <button type="submit" name="save_credentials" class="button button-primary">Save Credentials</button>
-                <button type="submit" name="check_connection" class="button button-secondary">Check Connection</button>
+                <?php if (get_option('linkedin_api_key') && get_option('linkedin_secret_key')): ?>
+                    <button type="submit" name="check_connection" class="button button-secondary">Check Connection</button>
+                <?php endif; ?>
             </p>
         </form>
+
+        <?php if (get_option('linkedin_api_key') && get_option('linkedin_secret_key')): ?>
+            <a href="<?php echo esc_url(redirect_to_linkedin_oauth()); ?>" class="button button-primary">Connect to LinkedIn</a>
+        <?php endif; ?>
+
         <?php if (isset($connection_status)) : ?>
             <p><strong><?php echo esc_html($connection_status); ?></strong></p>
         <?php endif; ?>
@@ -89,7 +89,14 @@ function social_share_credentials() {
     <?php
 }
 
-// Log page
+function redirect_to_linkedin_oauth() {
+    $linkedin_api_key = get_option('linkedin_api_key');
+    $redirect_uri = urlencode(admin_url('admin.php?page=add-credentials'));
+    $authorization_url = "https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id={$linkedin_api_key}&redirect_uri={$redirect_uri}&scope=w_member_social";
+    
+    return $authorization_url;
+}
+
 function social_share_log() {
     if (isset($_GET['delete_post']) && check_admin_referer('delete_post_action')) {
         $post_id = intval($_GET['delete_post']);
@@ -132,122 +139,150 @@ function social_share_log() {
     <?php
 }
 
-// Hook post publishing and editing actions to auto-share on LinkedIn
 add_action('publish_post', 'share_post_on_linkedin');
 add_action('edit_post', 'share_post_on_linkedin');
-add_action('admin_init', 'handle_linkedin_oauth_callback');
+add_action('init', 'handle_oauth_callback');
+
+function share_on_linkedin($is_article = true, $post_title = '', $post_url = '', $profile_id = '') {
+    $access_token = get_option('linkedin_access_token');
+    
+    if (!$access_token) {
+        return false; // No access token found
+    }
+
+    $share_content = $is_article ? [
+        'owner' => 'urn:li:person:' . $profile_id,
+        'subject' => 'Check out this article!',
+        'text' => ['text' => "This is a great article: $post_title - $post_url"],
+        'content' => [
+            'contentEntities' => [['entityLocation' => $post_url]],
+            'title' => $post_title
+        ],
+        'distribution' => ['linkedInDistributionTarget' => []]
+    ] : [
+        'owner' => 'urn:li:person:' . $profile_id,
+        'subject' => 'Just a text post!',
+        'text' => ['text' => "This is a simple text post: $post_title - $post_url"],
+        'distribution' => ['linkedInDistributionTarget' => []]
+    ];
+
+    $share_response = wp_remote_post('https://api.linkedin.com/v2/shares', [
+        'body' => json_encode($share_content),
+        'headers' => [
+            'Authorization' => 'Bearer ' . $access_token,
+            'Content-Type' => 'application/json',
+        ],
+    ]);
+
+    if (is_wp_error($share_response)) {
+        return false; // Indicate failure
+    }
+
+    $share_body = wp_remote_retrieve_body($share_response);
+    $share_data = json_decode($share_body, true);
+
+    return !empty($share_data['id']); // Return true if an ID is present
+}
 
 function share_post_on_linkedin($post_id) {
     $post = get_post($post_id);
     $post_title = $post->post_title;
     $post_url = get_permalink($post_id);
 
-    $linkedin_api_key = get_option('linkedin_api_key');
-    $linkedin_secret_key = get_option('linkedin_secret_key');
     $access_token = get_option('linkedin_access_token');
 
     if (!$access_token) {
-        $access_token = get_linkedin_access_token($linkedin_api_key, $linkedin_secret_key);
+        return; // Exit if no access token
     }
 
-    if (!$access_token) {
-        return;
+    $profile_id = get_linkedin_profile_id();
+
+    if (!$profile_id) {
+        return; // Exit if no profile ID
     }
 
-    $profile_response = wp_remote_get('https://api.linkedin.com/v2/me', [
-        'headers' => ['Authorization' => 'Bearer ' . $access_token]
-    ]);
+    $success = share_on_linkedin(true, $post_title, $post_url, $profile_id);
 
-    if (is_wp_error($profile_response)) {
-        error_log('LinkedIn profile request failed: ' . $profile_response->get_error_message());
-        return;
+    if ($success) {
+        // Optionally log the success message or take additional actions
+    } else {
+        // Optionally log the failure message or take additional actions
     }
-
-    $profile_data = json_decode(wp_remote_retrieve_body($profile_response), true);
-    $profile_id = $profile_data['id'];
-
-    $linkedin_url = 'https://api.linkedin.com/v2/shares';
-    $body = json_encode([
-        'content' => [
-            'contentEntities' => [['entityLocation' => $post_url]],
-            'title' => $post_title
-        ],
-        'distribution' => ['linkedInDistributionTarget' => []],
-        'owner' => 'urn:li:person:' . $profile_id,
-        'text' => ['text' => "Check out this post: $post_title - $post_url"]
-    ]);
-
-    $response = wp_remote_post($linkedin_url, [
-        'body' => $body,
-        'headers' => [
-            'Authorization' => 'Bearer ' . $access_token,
-            'Content-Type' => 'application/json'
-        ]
-    ]);
-
-    if (is_wp_error($response)) {
-        error_log('Error sharing post on LinkedIn: ' . $response->get_error_message());
-        return;
-    }
-
-    $status_code = wp_remote_retrieve_response_code($response);
-    if ($status_code != 201) {
-        error_log('Failed to share post on LinkedIn. Status code: ' . $status_code);
-        return;
-    }
-
-    // Log shared posts
-    $shared_posts = get_option('shared_posts_log', []);
-    $shared_posts[] = ['title' => $post_title, 'date_shared' => date('Y-m-d H:i:s'), 'ID' => $post_id];
-    update_option('shared_posts_log', $shared_posts);
 }
 
-// Function to retrieve LinkedIn access token
-function get_linkedin_access_token($api_key, $secret_key) {
-    // Check if we already have a stored access token
-    $access_token = get_option('linkedin_access_token');
-    if ($access_token) {
-        return $access_token;
-    }
+// function handle_oauth_callback() {
+//     if (isset($_GET['code'])) {
+//         $linkedin_secret_key = get_option('linkedin_secret_key');
+//         $linkedin_api_key = get_option('linkedin_api_key');
+//         $redirect_uri = urlencode(admin_url('admin.php?page=add-credentials'));
+//         $code = sanitize_text_field($_GET['code']);
 
-    // Request new access token if not found
-    $callback_url = admin_url('admin.php?page=social-share');
-    $token_url = "https://www.linkedin.com/oauth/v2/accessToken";
+//         $response = wp_remote_post('https://www.linkedin.com/oauth/v2/accessToken', [
+//             'body' => [
+//                 'grant_type' => 'authorization_code',
+//                 'code' => $code,
+//                 'redirect_uri' => $redirect_uri,
+//                 'client_id' => $linkedin_api_key,
+//                 'client_secret' => $linkedin_secret_key,
+//             ],
+//             'headers' => ['Content-Type' => 'application/x-www-form-urlencoded']
+//         ]);
 
-    $response = wp_remote_post($token_url, [
-        'body' => [
-            'grant_type' => 'authorization_code',
-            'code' => isset($_GET['code']) ? $_GET['code'] : '',
-            'redirect_uri' => $callback_url,
-            'client_id' => $api_key,
-            'client_secret' => $secret_key
-        ]
-    ]);
+//         if (!is_wp_error($response)) {
+//             $body = wp_remote_retrieve_body($response);
+//             $data = json_decode($body, true);
 
-    if (is_wp_error($response)) {
-        error_log('Error getting LinkedIn access token: ' . $response->get_error_message());
-        return null;
-    }
+//             if (isset($data['access_token'])) {
+//                 update_option('linkedin_access_token', $data['access_token']);
+//                 echo "<div class='updated'><p>Successfully connected to LinkedIn!</p></div>";
+//             } else {
+//                 echo "<div class='error'><p>Failed to retrieve access token.</p></div>";
+//             }
+//         } else {
+//             echo "<div class='error'><p>Error: " . $response->get_error_message() . "</p></div>";
+//         }
+//     }
+// }
 
-    $body = json_decode(wp_remote_retrieve_body($response), true);
-    if (isset($body['access_token'])) {
-        $access_token = $body['access_token'];
-        update_option('linkedin_access_token', $access_token);
-        return $access_token;
-    }
-
-    return null;
-}
-
-// Function to handle OAuth callback
-function handle_linkedin_oauth_callback() {
+function handle_oauth_callback() {
     if (isset($_GET['code'])) {
-        $api_key = get_option('linkedin_api_key');
-        $secret_key = get_option('linkedin_secret_key');
-        $access_token = get_linkedin_access_token($api_key, $secret_key);
-        if ($access_token) {
-            wp_safe_redirect(admin_url('admin.php?page=social-share'));
-            exit;
+        $linkedin_secret_key = get_option('linkedin_secret_key');
+        $linkedin_api_key = get_option('linkedin_api_key');
+        $redirect_uri = urlencode(admin_url('admin.php?page=add-credentials'));
+        $code = sanitize_text_field($_GET['code']);
+
+        // Debugging: Log request parameters
+        error_log("LinkedIn OAuth Callback: Code - $code, Redirect URI - $redirect_uri");
+
+        $response = wp_remote_post('https://www.linkedin.com/oauth/v2/accessToken', [
+            'body' => http_build_query([
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+                'redirect_uri' => $redirect_uri,
+                'client_id' => $linkedin_api_key,
+                'client_secret' => $linkedin_secret_key,
+            ]),
+            'headers' => ['Content-Type' => 'application/x-www-form-urlencoded']
+        ]);
+
+        // Debugging: Log response status and body
+        if (is_wp_error($response)) {
+            error_log("LinkedIn OAuth Error: " . $response->get_error_message());
+            echo "<div class='error'><p>Error: " . esc_html($response->get_error_message()) . "</p></div>";
+        } else {
+            $body = wp_remote_retrieve_body($response);
+            error_log("LinkedIn OAuth Response: " . $body);
+            $data = json_decode($body, true);
+
+            if (isset($data['access_token'])) {
+                update_option('linkedin_access_token', $data['access_token']);
+                echo "<div class='updated'><p>Successfully connected to LinkedIn!</p></div>";
+            } else {
+                echo "<div class='error'><p>Failed to retrieve access token. Response: " . esc_html($body) . "</p></div>";
+            }
         }
     }
 }
+
+
+?>
