@@ -90,27 +90,29 @@ function social_share_credentials() {
 }
 
 function redirect_to_linkedin_oauth() {
-    // Dynamically retrieve LinkedIn API Key (client_id) from WordPress options
+    // Dynamically retrieve LinkedIn API Key (client_id)
     $linkedin_api_key = get_option('linkedin_api_key');
     
-    // Define the redirect URI, dynamically based on admin URL and page
+    // Generate a unique state value
+    $state = bin2hex(random_bytes(16));  // Generates a random 32-character string
+    $_SESSION['linkedin_oauth_state'] = $state;  // Save state in session to validate later
+
+    // Define the redirect URI
     $redirect_uri = urlencode(admin_url('admin.php?page=add-credentials'));
 
-    // Define additional parameters like state and scope
-    $state = 'SomeRandomString';  // For CSRF protection, you can generate a unique state per request
-    $scope = 'w_member_social';  // Dynamically set scopes
-
-    // Construct the LinkedIn OAuth Authorization URL
+    // Construct LinkedIn OAuth Authorization URL
     $authorization_url = "https://www.linkedin.com/oauth/v2/authorization"
         . "?response_type=code"
         . "&client_id={$linkedin_api_key}"
         . "&redirect_uri={$redirect_uri}"
-        . "&scope={$scope}"
+        . "&scope=w_member_social"
         . "&state={$state}";
 
-    // Return the fully constructed URL
-    return $authorization_url;
+    // Redirect to LinkedIn OAuth URL
+    wp_redirect($authorization_url);
+    exit;
 }
+
 
 function social_share_log() {
     ?>
@@ -125,16 +127,22 @@ function social_share_log() {
             </thead>
             <tbody>
                 <?php
+                // Retrieve shared posts log from options
                 $shared_posts = get_option('shared_posts_log', []);
+
                 if (!empty($shared_posts)) {
+                    // Display each shared post
                     foreach ($shared_posts as $post) {
                         echo "<tr>
-                                <td>{$post['title']}</td>
-                                <td>{$post['date_shared']}</td>
+                                <td>" . esc_html($post['title']) . "</td>
+                                <td>" . esc_html($post['date_shared']) . "</td>
                             </tr>";
                     }
                 } else {
-                    echo "<tr><td colspan='3'>No posts shared yet.</td></tr>";
+                    // If no posts shared yet
+                    echo "<tr>
+                            <td colspan='2'>No posts shared yet.</td>
+                          </tr>";
                 }
                 ?>
             </tbody>
@@ -142,6 +150,7 @@ function social_share_log() {
     </div>
     <?php
 }
+
 
 add_action('publish_post', 'share_post_on_linkedin');
 add_action('edit_post', 'share_post_on_linkedin');
@@ -187,8 +196,18 @@ function share_post_on_linkedin($post_id) {
 }
 
 function linkedin_oauth_callback() {
-    if (isset($_GET['code']) && isset($_GET['page']) && $_GET['page'] === 'add-credentials') {
+    // Check if authorization code and state are present
+    if (isset($_GET['code']) && isset($_GET['state']) && isset($_GET['page']) && $_GET['page'] === 'add-credentials') {
         $authorization_code = sanitize_text_field($_GET['code']);
+        $received_state = sanitize_text_field($_GET['state']);
+
+        // Validate the state parameter
+        if ($received_state !== $_SESSION['linkedin_oauth_state']) {
+            // State does not match, likely CSRF attack
+            wp_die('Unauthorized: Invalid state parameter.', '401 Unauthorized', array('response' => 401));
+        }
+
+        // Continue with the token exchange if the state matches
         $linkedin_api_key = get_option('linkedin_api_key');
         $linkedin_secret_key = get_option('linkedin_secret_key');
         $redirect_uri = admin_url('admin.php?page=add-credentials');
@@ -208,16 +227,20 @@ function linkedin_oauth_callback() {
             $data = json_decode($body, true);
 
             if (isset($data['access_token'])) {
+                // Store access token and redirect with success
                 update_option('linkedin_access_token', $data['access_token']);
                 update_option('linkedin_token_expiry', time() + $data['expires_in']);
                 wp_redirect(admin_url('admin.php?page=add-credentials&oauth_success=1'));
                 exit;
             }
         }
+
+        // Redirect to error page if token retrieval fails
         wp_redirect(admin_url('admin.php?page=add-credentials&oauth_error=1'));
         exit;
     }
 }
+
 
 function check_linkedin_token_expiry() {
     $token_expiry = get_option('linkedin_token_expiry');
@@ -248,3 +271,4 @@ function check_linkedin_token_expiry() {
         }
     }
 }
+l
