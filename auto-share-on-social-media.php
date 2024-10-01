@@ -1,14 +1,14 @@
 <?php
 /**
- * Plugin Name: Auto Share on LinkedIn
- * Description: Automatically shares WordPress posts on LinkedIn when a post is published or updated.
- * Version: 1.1
+ * Plugin Name: Auto Share Text Post on LinkedIn
+ * Description: Automatically shares text-only WordPress posts on LinkedIn when a post is published or updated.
+ * Version: 1.4
  * Author: Aasakya Digital
  */
 
+// Adding menu for the LinkedIn share plugin
 add_action('admin_menu', 'social_share_menu');
 
-// Create an admin menu for the plugin
 function social_share_menu() {
     add_menu_page('Social Share Plugin', 'Social Share', 'edit_posts', 'social-share', 'social_share_instructions', 'dashicons-share');
     add_submenu_page('social-share', 'User Instructions', 'User Instructions', 'manage_options', 'user-instructions', 'social_share_instructions');
@@ -20,11 +20,11 @@ function social_share_instructions() {
     ?>
     <div class="wrap">
         <h1>User Instructions</h1>
-        <p>This plugin automatically shares your WordPress posts on LinkedIn when a post is created or updated. Follow the steps below:</p>
+        <p>This plugin automatically shares text-only WordPress posts on LinkedIn when a post is created or updated. Follow the steps below:</p>
         <ol>
             <li>Go to the 'Add Credentials' page and enter your LinkedIn API Key and Secret.</li>
             <li>Save the credentials and use the 'Connect to LinkedIn' button to establish the LinkedIn API integration.</li>
-            <li>Once connected, any post you publish or update will be shared on LinkedIn.</li>
+            <li>Once connected, any text post you publish or update will be shared on LinkedIn.</li>
         </ol>
     </div>
     <?php
@@ -106,7 +106,7 @@ function redirect_to_linkedin_oauth() {
     set_transient('linkedin_oauth_state', $state, 3600);
 
     $redirect_uri = admin_url('admin.php?page=add-credentials&action=linkedin_oauth_callback');
-    $scopes = 'openid profile email w_member_social';
+    $scopes = 'openid profile email w_member_social'; // Scope for member post sharing
 
     $authorization_url = "https://www.linkedin.com/oauth/v2/authorization"
         . "?response_type=code"
@@ -156,6 +156,20 @@ function linkedin_oauth_callback() {
                         update_option('linkedin_refresh_token', $body['refresh_token']);
                     }
 
+                    // Fetch LinkedIn member details and store user URN
+                    $response_profile = wp_remote_get('https://api.linkedin.com/v2/userinfo', [
+                        'headers' => [
+                            'Authorization' => 'Bearer ' . $body['access_token']
+                        ]
+                    ]);
+
+                    if (!is_wp_error($response_profile)) {
+                        $profile_data = json_decode(wp_remote_retrieve_body($response_profile), true);
+                        if (isset($profile_data['sub'])) {
+                            update_option('linkedin_user_urn', 'urn:li:person:' . $profile_data['sub']);
+                        }
+                    }
+
                     delete_transient('linkedin_oauth_state');
                     wp_redirect(admin_url('admin.php?page=add-credentials&connected=1'));
                     exit;
@@ -193,28 +207,63 @@ function check_linkedin_token_expiry() {
                     update_option('linkedin_access_token', $body['access_token']);
                     update_option('linkedin_token_expiry_time', time() + 3600);
                 }
-            } else {
-                error_log('LinkedIn token refresh failed: ' . wp_remote_retrieve_body($response));
             }
-        } elseif (time() >= $expiry_time) {
-            delete_option('linkedin_access_token');
-            delete_option('linkedin_token_expiry_time');
         }
     }
 }
 
-function get_linkedin_profile_data() {
+// Sharing the post on LinkedIn after publishing or updating
+add_action('publish_post', 'auto_share_post_on_linkedin', 10, 2);
+
+function auto_share_post_on_linkedin($ID, $post) {
+    check_linkedin_token_expiry();
+
     $access_token = get_option('linkedin_access_token');
+    $user_urn = get_option('linkedin_user_urn'); // Use member's URN for personal post
 
-    $profile_response = wp_remote_get('https://api.linkedin.com/v2/me', [
-        'headers' => ['Authorization' => 'Bearer ' . $access_token],
-    ]);
+    if ($access_token && $user_urn) {
+        $post_title = get_the_title($ID);
+        $post_link = get_permalink($ID);
+        $post_content = wp_strip_all_tags(get_post_field('post_content', $ID));
 
-    if (!is_wp_error($profile_response)) {
-        $profile_data = json_decode(wp_remote_retrieve_body($profile_response), true);
-        return $profile_data;
+        // Construct LinkedIn post data (for text-only posts)
+        $post_data = [
+            'author' => $user_urn,
+            'lifecycleState' => 'PUBLISHED',
+            'specificContent' => [
+                'com.linkedin.ugc.ShareContent' => [
+                    'shareCommentary' => [
+                        'text' => $post_title . ' - ' . $post_link . "\n\n" . $post_content,
+                    ],
+                    'shareMediaCategory' => 'NONE'
+                ]
+            ],
+            'visibility' => [
+                'com.linkedin.ugc.MemberNetworkVisibility' => 'PUBLIC'
+            ]
+        ];
+
+        // Make API request to share the post
+        $response = wp_remote_post('https://api.linkedin.com/v2/ugcPosts', [
+            'headers' => [
+                'Authorization' => 'Bearer ' . $access_token,
+                'Content-Type' => 'application/json',
+                'X-Restli-Protocol-Version' => '2.0.0' // Restli protocol version
+            ],
+            'body' => json_encode($post_data),
+        ]);
+
+        if (is_wp_error($response)) {
+            error_log('LinkedIn API error: ' . $response->get_error_message());
+        } else {
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            if (isset($body['id'])) {
+                error_log('LinkedIn Post ID: ' . $body['id']);
+            } else {
+                error_log('LinkedIn Post failed: ' . wp_remote_retrieve_body($response));
+            }
+        }
+    } else {
+        error_log('LinkedIn Access Token or User URN is missing.');
     }
-
-    return null;
 }
-?>
